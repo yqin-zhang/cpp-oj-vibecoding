@@ -68,13 +68,15 @@
 
 ```
 cpp-oj-vibecoding/
+├── CMakeLists.txt         # 顶层构建：add_subdirectory(server tests)
 ├── server/                # C++ 后端
-│   ├── CMakeLists.txt
+│   ├── CMakeLists.txt     # 库 target：judge（判题核心，可独立链接测试）
 │   ├── src/
 │   │   ├── main.cpp       # 服务入口、路由注册、线程池配置
-│   │   ├── db/            # SQLite / MySQL 访问封装（原生 C++ SQL）
+│   │   ├── db/            # SQLite / MySQL 访问封装（原生 C++ SQL，DAO）
 │   │   ├── auth/          # session 管理、密码哈希、角色
 │   │   └── judge/         # 判题器（编译、fork、setrlimit、比对、闸）
+│   │       └── output_compare.*  # 输出比对核心（AC/WA/PE 判定，纯函数）
 │   └── static/            # 编译期可选的静态资源路径（若无则指向 ../../web）
 ├── web/                   # 前端（原生 HTML/CSS/JS）
 │   ├── index.html         # 题目列表
@@ -84,8 +86,15 @@ cpp-oj-vibecoding/
 │   ├── leaderboard.html   # 排行榜
 │   ├── admin/             # 后台：题目/用例/用户/日志
 │   └── css/ js/           # 样式与脚本
+├── tests/                 # 自动化测试（原生 C++，零第三方库依赖）
+│   ├── CMakeLists.txt     # 生成 unit_tests，接入 ctest
+│   └── unit/
+│       ├── support/minitest.hpp        # 极简断言/注册框架（无第三方框架）
+│       ├── test_main.cpp               # 测试入口（RUN_ALL）
+│       └── test_output_compare.cpp     # 判题比对核心单测（AC/WA/PE）
 ├── scripts/
-│   └── seed.sql / seed.sh # 种子数据（admin + 示例题 + 用例）
+│   ├── seed.sql           # MySQL 建表 + 种子数据（admin 账号 + 3 道示例题 + 用例）
+│   └── seed.sh            # 一键建库、执行 seed.sql（可加 SQLite 建表初始化）
 ├── SPEC.md
 └── README.md
 ```
@@ -211,6 +220,64 @@ time_limit_ms(默认 2000, 运行时限), memory_limit_mb(默认 256),
 | 中文乱码 | 全局 UTF-8，MySQL charset=utf8mb4 |
 | 库连接异常 | API 返回 500 + 结构化错误体，判题闸原子释放避免假死 |
 
+### 4.7 数据库建表 SQL
+
+**MySQL（题目 / 用例 / 题面，库名 `oj_problems`）**：全部 `utf8mb4`，见 §4.6「中文乱码」。
+标准用例与示例用例合入单表，用 `is_sample` 区分（API 只向用户暴露 `is_sample=1` 的示例）。
+
+```sql
+-- 0) 建库（utf8mb4，支持中文 / emoji）
+CREATE DATABASE IF NOT EXISTS oj_problems
+  DEFAULT CHARACTER SET utf8mb4
+  COLLATE utf8mb4_unicode_ci;
+USE oj_problems;
+
+-- 1) 题目表（对应 §4.5 字段；题面 HTML 以 MEDIUMTEXT 存储）
+CREATE TABLE IF NOT EXISTS problems (
+  id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  title           VARCHAR(255) NOT NULL,
+  difficulty      ENUM('easy','medium','hard') NOT NULL DEFAULT 'easy',
+  content_html    MEDIUMTEXT   NOT NULL,                -- 题面 HTML 片段
+  time_limit_ms   INT UNSIGNED NOT NULL DEFAULT 2000,   -- 运行时限（不含编译）
+  memory_limit_mb INT UNSIGNED NOT NULL DEFAULT 256,    -- 内存限制 (MB)
+  created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_difficulty (difficulty)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 2) 用例表（标准 IO 用例组，题目∷用例 一对多；删题级联删用例）
+CREATE TABLE IF NOT EXISTS test_cases (
+  id           BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  problem_id   BIGINT UNSIGNED NOT NULL,
+  input_text   MEDIUMTEXT NOT NULL,     -- 可为空字符串（空 stdin，EOF）
+  output_text  MEDIUMTEXT NOT NULL,     -- 期望输出
+  is_sample    TINYINT(1) NOT NULL DEFAULT 0,   -- 1=示例(展示)，0=标准(隐藏)
+  sort_order   INT NOT NULL DEFAULT 0,  -- 判题执行顺序
+  created_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_tc_problem FOREIGN KEY (problem_id)
+    REFERENCES problems(id) ON DELETE CASCADE,
+  KEY idx_problem (problem_id, sort_order)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+```
+
+**SQLite（用户，库文件 `oj.db`）**：用户持久化；session 驻内存、提交/排行不落库（§4.2）。
+
+```sql
+-- 用户表（password_hash = SHA-256(salt + password) 十六进制串）
+CREATE TABLE IF NOT EXISTS users (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  username      TEXT NOT NULL UNIQUE,        -- 3~20 位字母/数字/下划线
+  password_hash TEXT NOT NULL,
+  salt          TEXT NOT NULL,
+  role          TEXT NOT NULL DEFAULT 'user',-- role: user | admin
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+```
+
+> 说明：`.sql` DDL 与种子数据同步维护于 `scripts/seed.sql`（主板本以此处为准）；admin
+> 账号由 `seed.sh` + 服务端首次启动时写入 SQLite（盐随机生成，避免明文入库）。
+
 ---
 
 ## 5. 用户流程
@@ -316,9 +383,20 @@ Admin 登录（种子账号）→ 后台入口（仅 admin 可见）
 - [ ] 全局样式（类 LeetCode 简洁布局）、错误提示、401 跳转
 
 ### M5 测试与验收
-- [ ] 判题器单元/集成测试（八态各覆盖）
-- [ ] 前后端联调、并发压测脚本（模拟几十并发）确认不阻塞浏览
-- [ ] 文档：README（构建/运行/种子数据说明）
+- [ ] **测试框架**：自研极简框架 `tests/unit/support/minitest.hpp`（断言 + 用例注册，零第三方依赖），经 `tests/CMakeLists.txt` 接入 `ctest`
+- [ ] **判题核心单测**（`test_output_compare.cpp`，纯函数无需外部进程）：
+  - AC：完全相同 / 行尾尾随空白 / 首尾空行 / 全文仅尾随空白
+  - PE：逐 token 相同但空白/换行位置不同
+  - WA：token 顺序或内容不同
+- [ ] **判题器集成测试**（起真实 g++ + fork 沙箱，覆盖八态用例）：
+  - AC：正确程序 → AC
+  - WA：输出值不同 → WA；PE：输出 token 相同格式不同 → PE
+  - CE：语法错误源码 → CE（附编译器 stderr）
+  - TLE：`while(true);` → TLE；MLE：`malloc(1GB)` → MLE
+  - RE：`*(int*)0 = 1;`（段错误）→ RE；OLE：死循环打印 → OLE
+- [ ] **前后端联调**：注册/登录 → 提交 → 轮询全过程冒烟
+- [ ] **并发压测**：脚本模拟 ≥30 并发提交，确认判题排队、浏览/登录不阻塞（验收 8）
+- [ ] **文档**：README（构建 / 运行 / 种子数据 / 测试命令）
 
 ---
 
@@ -344,6 +422,10 @@ Admin 登录（种子账号）→ 后台入口（仅 admin 可见）
 
 **代码质量**
 13. `cmake --build` 零 warning 构建成功；判题器核心逻辑有自动化测试覆盖八态。
+
+**测试运行（统一命令）**
+14. 顶层构建 + 全部单测：`cmake -S . -B build && cmake --build build && ctest --test-dir build --output-on-failure`，一次零 warning、全绿。
+15. 判题比对单测（`unit_tests`)覆盖 §4.4：AC（尾随空白/首尾空行容错）、PE（token 相同空白不同）、WA（token 不同）；集成测试逐条构造八态源码并断言对应状态。
 
 ---
 
