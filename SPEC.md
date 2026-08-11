@@ -64,6 +64,23 @@
 | 协议 | REST + JSON，前端 `fetch` 消费 | 前后端清晰分离 |
 | 前端 | 原生 HTML/CSS/JS，**无第三方 JS 库**；编辑器为原生 textarea | 用户明确要求纯原生 |
 
+### 2.1.1 数据库访问方式（本机实测，M1 阶段确认）
+
+> ⚠️ MySQL 无密码免密登录依赖 **auth_socket 插件**（OS 用户与库用户同名即免密）；
+> 该账号由 `CREATE USER 'zyq'@'localhost' IDENTIFIED WITH auth_socket` 创建，等效 root 权限。
+> 若换机 / 重装 MySQL，需先以 `sudo mysql` 重建此账号与权限，再按 §4.7 建库建表。
+
+| 库 | 主机 | 端口 | 用户 | 密码 | 库名 | 连接方式 |
+| --- | --- | --- | --- | --- | --- | --- |
+| MySQL（题目 / 用例 / 题面） | localhost | 3306 | `zyq` | **无（auth_socket 免密）** | `oj_problems` | **Unix socket** `/var/run/mysqld/mysqld.sock`（TCP 明文被拒） |
+| SQLite（用户 / session） | 本机文件 | — | 无（无认证） | — | `oj.db`（进程内建文件） | 系统库 libsqlite3 直连 |
+
+- ⚠️ 实测：zyq 账号走 **auth_socket 插件**，**仅 Unix socket 可登录**，`mysql -h 127.0.0.1`（TCP）返回
+  `Access denied`。服务端代码须用 `localhost + /var/run/mysqld/mysqld.sock` 连接，用户名 `zyq`、密码为空。
+- 若换机 / 重装 MySQL，改走密码登录：`ALTER USER 'zyq'@'localhost' IDENTIFIED WITH caching_sha2_password BY '<密码>'`，
+  并将密码写入服务端配置（见 §2.1 双存储封装 DAO 的选型说明）。
+- SQLite 库文件路径由服务端启动参数 / 配置决定（默认项目根 `oj.db`）。
+
 ### 2.2 目录结构
 
 ```
@@ -357,8 +374,8 @@ Admin 登录（种子账号）→ 后台入口（仅 admin 可见）
 ## 7. TODO 清单（实施顺序，按里程碑）
 
 ### M1 基建与认证
-- [ ] 仓库结构，CMake（cpp-httplib + libsqlite3 + libmysqlclient + libcrypto + g++ 探测）
-- [ ] SQLite 封装（用户表）、MySQL 封装（题目表）
+- [x] 仓库结构，CMake（cpp-httplib + libsqlite3 + libmysqlclient + libcrypto + g++ 探测）
+- [x] SQLite 封装（用户表）、MySQL 封装（题目表）
 - [ ] 密码哈希（SHA-256 + salt）与 Session/Cookie 登录注册
 - [ ] 角色模型：普通用户 / admin 中间件
 
